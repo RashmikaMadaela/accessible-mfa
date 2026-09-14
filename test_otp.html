@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test OTP Module (Person B)</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; line-height: 1.6; }
+        .log { background: #f4f4f4; padding: 10px; border: 1px solid #ddd; height: 300px; overflow-y: auto; font-family: monospace; }
+        button { padding: 10px 15px; margin: 5px; font-size: 16px; cursor: pointer; }
+        input { padding: 10px; font-size: 16px; margin: 5px; }
+    </style>
+</head>
+<body>
+    <h1>OTP Module Self-Test</h1>
+    <p>Use the buttons below to test the functions of <code>otp.js</code> in isolation before integration.</p>
+    
+    <div>
+        <button id="btn-generate">1. Generate & Speak OTP</button>
+        <button id="btn-replay">2. Replay OTP</button>
+        <br><br>
+        <input type="text" id="otp-input" placeholder="Enter OTP here">
+        <button id="btn-verify">3. Verify OTP</button>
+    </div>
+
+    <h3>Test Log:</h3>
+    <div id="test-log" class="log"></div>
+
+    <script type="module">
+        import { generateOTP, speakOTP, replayOTP, verifyOTP, isExpired } from './otp.js';
+
+        const logDiv = document.getElementById('test-log');
+        function log(message) {
+            const time = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `[${time}] ${message}<br>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        document.getElementById('btn-generate').addEventListener('click', () => {
+            const otp = generateOTP();
+            log(`<b>Generated new OTP:</b> ${otp}`);
+            speakOTP(otp);
+            log(`Speaking OTP...`);
+        });
+
+        document.getElementById('btn-replay').addEventListener('click', () => {
+            log(`Replaying OTP...`);
+            replayOTP();
+        });
+
+        document.getElementById('btn-verify').addEventListener('click', () => {
+            const inputVal = document.getElementById('otp-input').value;
+            log(`Attempting to verify with input: "${inputVal}"`);
+            
+            if (isExpired()) {
+                log(`<span style="color:red">Status check: OTP is already expired (or not generated).</span>`);
+            }
+
+            const success = verifyOTP(inputVal);
+            if (success) {
+                log(`<span style="color:green">Verification SUCCESS! (Single-use flag is now set)</span>`);
+            } else {
+                log(`<span style="color:red">Verification FAILED! (Wrong OTP, expired, or already used)</span>`);
+            }
+        });
+
+        log("System ready. Open your browser console (F12) if you want to inspect further.");
+    </script>
+</body>
+</html>
+
