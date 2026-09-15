@@ -201,7 +201,7 @@
       <div class="demo-card" aria-label="Demo account information">
         <strong>Demo user for the assignment:</strong>
         <div>User ID: <code>user1</code></div>
-        <div>Password: provided in the assignment plan</div>
+        <div>Password: <code>demo123</code></div>
       </div>
     </section>
 
@@ -214,8 +214,9 @@
     >
       <h2 id="otp-heading">Verification code</h2>
       <p id="otp-instructions" class="hint">
-        First-factor authentication succeeded. Person B's OTP module will
-        generate, speak, replay, expire and verify the six-digit code here.
+        Your one-time verification code is being read aloud. Enter the
+        six-digit code below, or press Replay to hear it again. The code
+        expires shortly and can only be used once.
       </p>
 
       <form id="otp-form" novalidate>
@@ -244,9 +245,9 @@
       </form>
 
       <div class="demo-card">
-        <strong>Person A self-test:</strong>
-        The login module has completed its job when this screen appears.
-        OTP behavior is intentionally left for <code>otp.js</code>.
+        <strong>Tip:</strong>
+        Your screen reader will read the six-digit code aloud automatically.
+        Press "Replay code" at any time to hear it again.
       </div>
     </section>
 
@@ -266,11 +267,21 @@
   </main>
 
   <script type="module">
+    import { checkPassword, getDemoUserId } from "./auth.js";
     import {
-      checkPassword,
-      getDemoUserId,
-      GENERIC_AUTH_ERROR
-    } from "./auth.js";
+      generateOTP,
+      speakOTP,
+      replayOTP,
+      verifyOTP,
+      isExpired
+    } from "./otp.js";
+    import {
+      checkRateLimit,
+      logAttempt,
+      getGenericError,
+      getLockoutRemainingMs
+    } from "./security.js";
+    import { playSuccessChime, playFailChime } from "./audio.js";
 
     const loginScreen = document.getElementById("screen-login");
     const otpScreen = document.getElementById("screen-otp");
@@ -282,11 +293,23 @@
     const loginError = document.getElementById("login-error");
     const liveRegion = document.getElementById("aria-live");
 
+    const otpForm = document.getElementById("otp-form");
+    const otpInput = document.getElementById("otp-input");
+    const otpTimer = document.getElementById("otp-timer");
+    const otpStatus = document.getElementById("otp-status");
+    const otpReplayButton = document.getElementById("otp-replay");
+
+    const resultMessage = document.getElementById("result-message");
     const restartButton = document.getElementById("restart-button");
 
+    // The user ID that passed factor 1, carried into the OTP step so
+    // security.js can rate-limit/log OTP attempts against it.
+    let pendingUid = null;
+    let otpTimerInterval = null;
+
     function announce(message) {
-      // Simple Person A fallback.
-      // During integration Person C can replace/enhance this via a11y.js.
+      // Simple fallback live-region announcer.
+      // Person C's a11y.js can replace/enhance this during final integration.
       liveRegion.textContent = "";
       window.setTimeout(() => {
         liveRegion.textContent = message;
@@ -300,14 +323,74 @@
     }
 
     function showGenericError() {
-      loginError.textContent = GENERIC_AUTH_ERROR;
+      const message = getGenericError();
+      loginError.textContent = message;
       loginError.hidden = false;
-      announce(GENERIC_AUTH_ERROR);
+      announce(message);
+    }
+
+    function showLockoutMessage(remainingMs) {
+      const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+      const message = `Too many failed attempts. Please wait ${remainingSeconds} seconds and try again.`;
+      loginError.textContent = message;
+      loginError.hidden = false;
+      announce(message);
     }
 
     function clearLoginError() {
       loginError.textContent = "";
       loginError.hidden = true;
+    }
+
+    function clearOtpTimer() {
+      if (otpTimerInterval !== null) {
+        window.clearInterval(otpTimerInterval);
+        otpTimerInterval = null;
+      }
+    }
+
+    function startOtpTimer() {
+      clearOtpTimer();
+      otpTimer.textContent =
+        "Code sent. It expires shortly, so enter it soon (Replay if you need it again).";
+
+      otpTimerInterval = window.setInterval(() => {
+        if (isExpired()) {
+          otpTimer.textContent =
+            "This code has expired. Submitting it will fail — sign in again to get a new one.";
+          clearOtpTimer();
+        }
+      }, 1000);
+    }
+
+    // Returns to the login screen with a generic, factor-agnostic error so
+    // a wrong password and a wrong/expired/reused OTP look identical.
+    function bounceToLoginWithError() {
+      clearOtpTimer();
+      otpInput.value = "";
+      otpStatus.textContent = "";
+      loginForm.reset();
+      showOnly(loginScreen);
+      showGenericError();
+      if (pendingUid) {
+        uidInput.value = pendingUid;
+      }
+      pendingUid = null;
+      passwordInput.focus();
+    }
+
+    function bounceToLoginWithLockout(remainingMs) {
+      clearOtpTimer();
+      otpInput.value = "";
+      otpStatus.textContent = "";
+      loginForm.reset();
+      showOnly(loginScreen);
+      showLockoutMessage(remainingMs);
+      if (pendingUid) {
+        uidInput.value = pendingUid;
+      }
+      pendingUid = null;
+      uidInput.focus();
     }
 
     loginForm.addEventListener("submit", async (event) => {
@@ -319,6 +402,11 @@
 
       if (!uid || !pwd) {
         showGenericError();
+        return;
+      }
+
+      if (!checkRateLimit(uid)) {
+        showLockoutMessage(getLockoutRemainingMs(uid));
         return;
       }
 
@@ -335,15 +423,18 @@
           return;
         }
 
+        pendingUid = uid;
         passwordInput.value = "";
+
+        const otp = generateOTP();
+        speakOTP(otp);
+        startOtpTimer();
+
         showOnly(otpScreen);
         announce(
-          "First authentication factor accepted. Enter the verification code."
+          "First authentication factor accepted. Your verification code is being read aloud. Enter the six-digit code."
         );
-
-        // Basic focus behavior for Person A's standalone test.
-        // Person C's a11y.js will own final focus management.
-        document.getElementById("otp-input").focus();
+        otpInput.focus();
       } catch (error) {
         console.error("Authentication module error:", error);
         showGenericError();
@@ -352,7 +443,47 @@
       }
     });
 
+    otpForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+
+      const code = otpInput.value.trim();
+      const success = verifyOTP(code);
+
+      logAttempt(pendingUid, success);
+
+      if (success) {
+        clearOtpTimer();
+        otpInput.value = "";
+        playSuccessChime();
+
+        showOnly(resultScreen);
+        resultMessage.classList.remove("error");
+        resultMessage.textContent = "Login successful. Welcome back.";
+        announce("Login successful.");
+        pendingUid = null;
+        restartButton.focus();
+        return;
+      }
+
+      playFailChime();
+
+      if (!checkRateLimit(pendingUid)) {
+        bounceToLoginWithLockout(getLockoutRemainingMs(pendingUid));
+        return;
+      }
+
+      bounceToLoginWithError();
+    });
+
+    otpReplayButton.addEventListener("click", () => {
+      replayOTP();
+      otpStatus.textContent = "Replaying verification code.";
+      announce("Replaying verification code.");
+    });
+
     restartButton.addEventListener("click", () => {
+      clearOtpTimer();
+      pendingUid = null;
       loginForm.reset();
       clearLoginError();
       showOnly(loginScreen);
@@ -361,7 +492,7 @@
     });
 
     // Helpful development-only information; no plaintext password is printed.
-    console.info("Person A module loaded.");
+    console.info("Accessible MFA demo loaded.");
     console.info("Demo user ID:", getDemoUserId());
   </script>
 </body>
