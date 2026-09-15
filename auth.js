@@ -18,13 +18,19 @@ export const GENERIC_AUTH_ERROR =
 
 /**
  * Shared demo user from the team plan.
- * Password hash = SHA-256 of the agreed demo password.
+ * passwordHash = SHA-256(salt + agreed demo password).
  * The plaintext password is intentionally not stored here.
+ *
+ * The salt defeats precomputed rainbow-table lookups against the stored
+ * hash. It is hardcoded (rather than randomly generated per user) only
+ * because this prototype has no registration/backend to generate and
+ * persist a real per-user salt — see architecture.md Assumption 1.
  */
 const DEMO_USER = Object.freeze({
   uid: "user1",
+  salt: "9f2b7a4e1c6d3f58",
   passwordHash:
-    "d3ad9315b7be5dd53b31a273b3b3aba5defe700808305aa16a3062b76658a791"
+    "6a1bf0c8f3719d04e8cc2ca96a2830201808a897874febb00f82b0c8318a5b02"
 });
 
 /**
@@ -62,12 +68,15 @@ function safeEqual(a, b) {
 }
 
 /**
- * Hash a password with SHA-256 using the Web Crypto API.
+ * Hash a password with SHA-256 using the Web Crypto API. An optional salt
+ * is prepended before hashing so the stored digest can't be looked up in
+ * a precomputed rainbow table.
  *
  * @param {string} password
+ * @param {string} [salt] defaults to "" for plain, unsalted hashing
  * @returns {Promise<string>} lowercase SHA-256 hex digest
  */
-export async function hashPassword(password) {
+export async function hashPassword(password, salt = "") {
   if (typeof password !== "string") {
     throw new TypeError("Password must be a string.");
   }
@@ -78,7 +87,7 @@ export async function hashPassword(password) {
     );
   }
 
-  const encoded = new TextEncoder().encode(password);
+  const encoded = new TextEncoder().encode(salt + password);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", encoded);
 
   return bufferToHex(digest);
@@ -110,8 +119,9 @@ export async function checkPassword(uid, pwd) {
     return false;
   }
 
-  // Always hash the supplied password before deciding the result.
-  const suppliedHash = await hashPassword(pwd);
+  // Always hash the supplied password (with the same salt) before
+  // deciding the result.
+  const suppliedHash = await hashPassword(pwd, DEMO_USER.salt);
 
   const userExists = normalizedUid === DEMO_USER.uid;
   const passwordMatches = safeEqual(
