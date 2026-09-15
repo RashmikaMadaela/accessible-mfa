@@ -91,6 +91,10 @@
       color: #9b111e;
     }
 
+    .success {
+      color: #1a7431;
+    }
+
     .hint {
       color: #444;
       line-height: 1.5;
@@ -102,6 +106,15 @@
       border: 1px dashed #666;
       border-radius: 10px;
       background: #fafafa;
+    }
+
+    kbd {
+      background: #e9ecef;
+      border: 1px solid #adb5bd;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-family: inherit;
+      font-size: 0.9em;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -199,9 +212,9 @@
       </form>
 
       <div class="demo-card" aria-label="Demo account information">
-        <strong>Demo user for the assignment:</strong>
+        <strong>Demo user credentials:</strong>
         <div>User ID: <code>user1</code></div>
-        <div>Password: provided in the assignment plan</div>
+        <div>Password: <code>demo123</code></div>
       </div>
     </section>
 
@@ -214,8 +227,8 @@
     >
       <h2 id="otp-heading">Verification code</h2>
       <p id="otp-instructions" class="hint">
-        First-factor authentication succeeded. Person B's OTP module will
-        generate, speak, replay, expire and verify the six-digit code here.
+        First-factor authentication succeeded. Listen for the six-digit verification
+        code read aloud via text-to-speech, then enter it below.
       </p>
 
       <form id="otp-form" novalidate>
@@ -237,16 +250,17 @@
 
         <div class="actions">
           <button id="otp-submit" type="submit">Verify code</button>
-          <button id="otp-replay" type="button">Replay code</button>
+          <button id="otp-replay" type="button" accesskey="r">Replay code (Alt+R)</button>
         </div>
 
         <p id="otp-status" class="status" role="status"></p>
       </form>
 
       <div class="demo-card">
-        <strong>Person A self-test:</strong>
-        The login module has completed its job when this screen appears.
-        OTP behavior is intentionally left for <code>otp.js</code>.
+        <strong>Factor 2 (OTP) Security Details:</strong>
+        <div>The code is spoken aloud via TTS.</div>
+        <div>Expires in 30 seconds &bull; Single-use only (replay protection).</div>
+        <div>Press <kbd>Alt+R</kbd> or the button above to replay the code.</div>
       </div>
     </section>
 
@@ -271,6 +285,33 @@
       getDemoUserId,
       GENERIC_AUTH_ERROR
     } from "./auth.js";
+    import {
+      generateOTP,
+      speakOTP,
+      replayOTP,
+      verifyOTP,
+      isExpired,
+      resetOTP
+    } from "./otp.js";
+    import {
+      playSuccessChime,
+      playFailChime
+    } from "./audio.js";
+    import {
+      checkRateLimit,
+      logAttempt,
+      getGenericError,
+      getAuditLog
+    } from "./security.js";
+    import {
+      announce,
+      focusNext,
+      setupKeyboardNav
+    } from "./a11y.js";
+
+    // Application state
+    let currentUid = "";
+    let countdownTimerId = null;
 
     const loginScreen = document.getElementById("screen-login");
     const otpScreen = document.getElementById("screen-otp");
@@ -280,36 +321,59 @@
     const uidInput = document.getElementById("uid");
     const passwordInput = document.getElementById("password");
     const loginError = document.getElementById("login-error");
-    const liveRegion = document.getElementById("aria-live");
+    const loginSubmit = document.getElementById("login-submit");
 
+    const otpForm = document.getElementById("otp-form");
+    const otpInput = document.getElementById("otp-input");
+    const otpTimer = document.getElementById("otp-timer");
+    const otpStatus = document.getElementById("otp-status");
+    const otpSubmit = document.getElementById("otp-submit");
+    const otpReplay = document.getElementById("otp-replay");
+
+    const resultTitle = document.getElementById("result-title");
+    const resultMessage = document.getElementById("result-message");
     const restartButton = document.getElementById("restart-button");
-
-    function announce(message) {
-      // Simple Person A fallback.
-      // During integration Person C can replace/enhance this via a11y.js.
-      liveRegion.textContent = "";
-      window.setTimeout(() => {
-        liveRegion.textContent = message;
-      }, 10);
-    }
-
-    function showOnly(screen) {
-      [loginScreen, otpScreen, resultScreen].forEach((item) => {
-        item.hidden = item !== screen;
-      });
-    }
-
-    function showGenericError() {
-      loginError.textContent = GENERIC_AUTH_ERROR;
-      loginError.hidden = false;
-      announce(GENERIC_AUTH_ERROR);
-    }
 
     function clearLoginError() {
       loginError.textContent = "";
       loginError.hidden = true;
     }
 
+    function showGenericLoginError() {
+      const err = getGenericError();
+      loginError.textContent = err;
+      loginError.hidden = false;
+      announce(err);
+      playFailChime();
+    }
+
+    function startOtpCountdown(seconds = 30) {
+      clearInterval(countdownTimerId);
+      const expiresAt = Date.now() + seconds * 1000;
+
+      const update = () => {
+        const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+        if (remaining > 0) {
+          otpTimer.textContent = `Code expires in ${remaining}s.`;
+          otpTimer.className = "status";
+        } else {
+          clearInterval(countdownTimerId);
+          otpTimer.textContent = "Verification code has expired. Please replay or start again.";
+          otpTimer.className = "status error";
+        }
+      };
+
+      update();
+      countdownTimerId = setInterval(update, 1000);
+    }
+
+    function stopOtpCountdown() {
+      clearInterval(countdownTimerId);
+      otpTimer.textContent = "";
+      otpTimer.className = "status";
+    }
+
+    // Step 1: Login Form Submission (Factor 1 - Password)
     loginForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       clearLoginError();
@@ -318,51 +382,197 @@
       const pwd = passwordInput.value;
 
       if (!uid || !pwd) {
-        showGenericError();
+        showGenericLoginError();
         return;
       }
 
-      const submitButton = document.getElementById("login-submit");
-      submitButton.disabled = true;
+      // Security check: Rate limit / lockout
+      if (!checkRateLimit(uid)) {
+        const lockoutMsg = "Account temporarily locked due to multiple failed attempts. Please try again later.";
+        loginError.textContent = lockoutMsg;
+        loginError.hidden = false;
+        announce(lockoutMsg);
+        playFailChime();
+        return;
+      }
+
+      loginSubmit.disabled = true;
 
       try {
         const isValid = await checkPassword(uid, pwd);
 
         if (!isValid) {
-          showGenericError();
+          logAttempt(uid, false);
+          showGenericLoginError();
           passwordInput.value = "";
           passwordInput.focus();
           return;
         }
 
+        // Password accepted! Prepare Factor 2 (OTP)
+        currentUid = uid;
         passwordInput.value = "";
-        showOnly(otpScreen);
+        clearLoginError();
+
+        // Switch to OTP screen with accessible focus management
+        focusNext("screen-otp");
+
+        // Generate and speak the one-time passcode
+        const otp = generateOTP();
+        console.info("Generated OTP (for dev inspection):", otp);
+        speakOTP(otp);
+
         announce(
-          "First authentication factor accepted. Enter the verification code."
+          "First authentication factor accepted. Your six-digit verification code has been spoken aloud."
         );
 
-        // Basic focus behavior for Person A's standalone test.
-        // Person C's a11y.js will own final focus management.
-        document.getElementById("otp-input").focus();
+        // Reset OTP form UI
+        otpInput.value = "";
+        otpStatus.textContent = "";
+        otpStatus.className = "status";
+        otpSubmit.disabled = false;
+        otpReplay.disabled = false;
+
+        // Start 30-second expiry countdown
+        startOtpCountdown(30);
       } catch (error) {
         console.error("Authentication module error:", error);
-        showGenericError();
+        showGenericLoginError();
       } finally {
-        submitButton.disabled = false;
+        loginSubmit.disabled = false;
       }
     });
 
+    // Step 2: OTP Replay Handler
+    function handleReplay() {
+      if (!checkRateLimit(currentUid)) {
+        const lockoutMsg = "Account temporarily locked due to multiple failed attempts.";
+        otpStatus.textContent = lockoutMsg;
+        otpStatus.className = "status error";
+        announce(lockoutMsg);
+        playFailChime();
+        return;
+      }
+
+      if (isExpired()) {
+        replayOTP(); // Speaks the expired alert
+        otpStatus.textContent = "Your verification code has expired. Please start again.";
+        otpStatus.className = "status error";
+        announce("Your verification code has expired. Please start again.");
+        playFailChime();
+      } else {
+        replayOTP();
+        otpStatus.textContent = "Replaying verification code...";
+        otpStatus.className = "status hint";
+        announce("Replaying verification code.");
+      }
+      otpInput.focus();
+    }
+
+    otpReplay.addEventListener("click", handleReplay);
+
+    // Step 3: OTP Form Submission (Factor 2 - Code verification)
+    otpForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      otpStatus.textContent = "";
+      otpStatus.className = "status";
+
+      if (!checkRateLimit(currentUid)) {
+        const lockoutMsg = "Account temporarily locked due to multiple failed attempts.";
+        otpStatus.textContent = lockoutMsg;
+        otpStatus.className = "status error";
+        announce(lockoutMsg);
+        playFailChime();
+        return;
+      }
+
+      const enteredOtp = otpInput.value.trim();
+      if (!enteredOtp) {
+        const emptyMsg = "Please enter the six-digit verification code.";
+        otpStatus.textContent = emptyMsg;
+        otpStatus.className = "status error";
+        announce(emptyMsg);
+        playFailChime();
+        otpInput.focus();
+        return;
+      }
+
+      const isValid = verifyOTP(enteredOtp);
+
+      if (isValid) {
+        // SUCCESS: Both factors authenticated
+        stopOtpCountdown();
+        logAttempt(currentUid, true);
+        playSuccessChime();
+
+        if (window.speechSynthesis) {
+          window.speechSynthesis.cancel();
+        }
+
+        resultTitle.textContent = "Authentication Successful";
+        resultMessage.textContent = `Welcome, ${currentUid}! You have successfully authenticated using both password and spoken OTP.`;
+        resultMessage.className = "status success";
+
+        focusNext("screen-result");
+        announce(`Authentication successful! Welcome, ${currentUid}.`);
+      } else {
+        // FAILURE: Invalid, expired, or reused OTP
+        logAttempt(currentUid, false);
+        playFailChime();
+
+        const isLocked = !checkRateLimit(currentUid);
+        if (isLocked) {
+          const lockoutMsg = "Account locked: Maximum failed attempts exceeded. Please try again later.";
+          otpStatus.textContent = lockoutMsg;
+          otpStatus.className = "status error";
+          announce(lockoutMsg);
+          otpSubmit.disabled = true;
+          otpReplay.disabled = true;
+        } else {
+          const err = getGenericError();
+          otpStatus.textContent = err;
+          otpStatus.className = "status error";
+          announce(err);
+          otpInput.value = "";
+          otpInput.focus();
+        }
+      }
+    });
+
+    // Step 4: Restart Button Handler (Result screen -> Login screen)
     restartButton.addEventListener("click", () => {
+      stopOtpCountdown();
+      resetOTP();
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+
       loginForm.reset();
+      otpForm.reset();
       clearLoginError();
-      showOnly(loginScreen);
-      uidInput.focus();
+      otpStatus.textContent = "";
+      otpStatus.className = "status";
+      otpSubmit.disabled = false;
+      otpReplay.disabled = false;
+      currentUid = "";
+
+      focusNext("screen-login");
       announce("Sign in screen.");
     });
 
-    // Helpful development-only information; no plaintext password is printed.
-    console.info("Person A module loaded.");
-    console.info("Demo user ID:", getDemoUserId());
+    // Keyboard shortcuts: Alt+R for replay, Escape to silence TTS
+    setupKeyboardNav({
+      onReplay: handleReplay
+    });
+
+    // Expose helpers on window for grading & console inspection
+    window.__accessibleMfa = {
+      getAuditLog,
+      getDemoUserId
+    };
+
+    console.info("Accessible MFA system integrated successfully.");
+    console.info("Demo user ID:", getDemoUserId(), "(Password: demo123)");
   </script>
 </body>
 </html>

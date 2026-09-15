@@ -87,11 +87,24 @@ export function verifyOTP(input) {
         return false; 
     }
     
-    if (input === currentOTP) {
+    const cleanInput = typeof input === "string" ? input.trim() : String(input || "");
+    if (cleanInput === currentOTP) {
         isUsed = true; // Mark as used to prevent replay attacks with the same OTP
         return true;
     }
     
     return false;
+}
+
+/**
+ * Resets the current OTP state and cancels any ongoing speech.
+ */
+export function resetOTP() {
+    currentOTP = null;
+    otpGenerationTime = null;
+    isUsed = false;
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+    }
 }
 
