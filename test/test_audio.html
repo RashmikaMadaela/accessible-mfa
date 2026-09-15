@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <button id="ok">Success</button>
+  <button id="fail">Fail</button>
+  <script type="module">
+    import { playSuccessChime, playFailChime } from '../audio.js';
+    document.getElementById('ok').onclick = playSuccessChime;
+    document.getElementById('fail').onclick = playFailChime;
+  </script>
+</body>
+</html>
