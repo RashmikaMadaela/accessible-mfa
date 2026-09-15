@@ -1,17 +1,9 @@
 /**
- * Person E - Security module
- * Accessible MFA lecture assignment
- *
  * Responsibility:
  * - Rate limiting / lockout after repeated failed attempts
  * - In-memory audit logging of every authentication attempt
  * - Generic, factor-agnostic error text
- *
- * Matches the contract agreed in architecture.md section 2.1:
- *   checkRateLimit(uid) -> boolean
- *   logAttempt(uid, success)
- *   getGenericError() -> string
- *
+
  * State lives only in browser memory for the session (see architecture.md
  * Assumptions 3 and 6): reloading the page clears both the audit log and
  * any active lockout.
